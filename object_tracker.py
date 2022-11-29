@@ -45,7 +45,7 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
     NUM_CLASS = read_class_names(CLASSES)
     key_list = list(NUM_CLASS.keys())
     val_list = list(NUM_CLASS.values())
-    while True:
+    for i in range(300):
         _, frame = vid.read()
 
         try:
