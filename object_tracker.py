@@ -102,18 +102,25 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
 
         # Obtain info from the tracks
         tracked_bboxes = []
+        not_in_line_bboxes = []
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 5:
                 continue
             bbox = track.to_tlbr()  # Get the corrected/predicted bounding box
+            bbox_height = bbox[3] - bbox[1]
             class_name = track.get_class()  # Get the class name of particular object
             tracking_id = track.track_id  # Get the ID for the particular track
             index = key_list[val_list.index(class_name)]  # Get predicted object index by object name
+            if not (320 < bbox[3] < 700) or bbox_height > 600:
+                not_in_line_bboxes.append(bbox.tolist() + [tracking_id, index])
+                continue
             tracked_bboxes.append(bbox.tolist() + [tracking_id,
                                                    index])  # Structure data, that we could use it with our draw_bbox function
 
-        # draw detection on frame
-        image = draw_bbox(original_frame, tracked_bboxes, CLASSES=CLASSES, tracking=True)
+        # draw people in line on frame
+        image = draw_bbox(original_frame, tracked_bboxes, CLASSES=CLASSES, tracking=True, in_line=True)
+        # draw people not in line
+        image = draw_bbox(image, not_in_line_bboxes, CLASSES=CLASSES, tracking=True, in_line=False)
 
         t3 = time.time()
         times.append(t2 - t1)
@@ -149,3 +156,4 @@ if __name__ == '__main__':
     yolo = Load_Yolo_model()
     Object_tracking(yolo, video_path, "track.mp4", input_size=YOLO_INPUT_SIZE, show=False, iou_threshold=0.1,
                 rectangle_colors=(255, 0, 0), Track_only=["person"])
+    exit(0)
