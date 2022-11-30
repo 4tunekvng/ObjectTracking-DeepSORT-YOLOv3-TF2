@@ -3,6 +3,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import cv2
 import numpy as np
+from sklearn.linear_model import LinearRegression
 import tensorflow as tf
 from yolov3.utils import Load_Yolo_model, image_preprocess, postprocess_boxes, nms, draw_bbox, read_class_names
 from yolov3.configs import *
@@ -45,6 +46,30 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
     NUM_CLASS = read_class_names(CLASSES)
     key_list = list(NUM_CLASS.keys())
     val_list = list(NUM_CLASS.values())
+
+    # cam: adding code to detect ppl crossing certain point
+    # this variable stores the index of the vertical line used as the threshold for counting someone as "moved"
+    thresh_right = int(width/3)
+    thresh_left = int(width*2/3)
+    # note: we only want to count people who move in the NEGATIVE x direction
+    total_crossers = 0
+    # create a dictionary of people identified by #, with both their previous x-left and current x-left
+    # we also want to store the avg delta as part of our "who is in line?" decision logic
+    #             id: [prev, curr, avg delta]
+    # persons = { 10: [352, 346, -6],
+    #             45: [901, 852, -49],
+    #             etc. }
+    # idea is that if prev_x > x_thresh and curr_x <= x_thresh, we add them to tally of ppl who crossed
+    persons = {}
+
+    # if we have a video of people in line, most people are going to be moving at the same speed
+    # let's find that most common speed, and if people are within a range of that, then we can with confidence say they're in line
+    # build on the previous dictionary
+    curr_mid_ppl = []
+    curr_left_ppl = []
+    prev_mid_ppl = []
+    prev_left_ppl = []
+    tput_history = []
     for i in range(300):
         _, frame = vid.read()
 
@@ -53,6 +78,12 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
             original_frame = cv2.cvtColor(original_frame, cv2.COLOR_BGR2RGB)
         except:
             break
+
+        for id in persons.keys():
+            # update average horizontal motion
+            persons[id][2] = (persons[id][2] + (persons[id][1] - persons[id][0])) / 2
+            # update previous x to be current x
+            persons[id][1] = persons[id][0]
 
         image_data = image_preprocess(np.copy(original_frame), [input_size, input_size])
         # image_data = tf.expand_dims(image_data, 0)
@@ -103,19 +134,79 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
         # Obtain info from the tracks
         tracked_bboxes = []
         not_in_line_bboxes = []
+        if i != 0 and i % 10 == 0:
+            prev_left_ppl = curr_left_ppl
+            prev_mid_ppl = curr_mid_ppl
+        curr_left_ppl = []
+        curr_mid_ppl = []
+
+        top_X = np.array([])
+        top_y = np.array([])
+        bot_X = np.array([])
+        bot_y = np.array([])
         for track in tracker.tracks:
-            if not track.is_confirmed() or track.time_since_update > 5:
+            tl_x, tl_y, width, height = track.to_tlwh()
+            top_X = np.append(top_X, tl_x)
+            top_y = np.append(top_y, tl_y)
+            bot_X = np.append(bot_X, tl_x)
+            bot_y = np.append(bot_y, tl_y + height)
+        top_X = top_X.reshape(-1, 1)
+        top_y = top_y.reshape(-1, 1)
+        bot_X = bot_X.reshape(-1, 1)
+        bot_y = bot_y.reshape(-1, 1)
+        top_reg = LinearRegression().fit(top_X, top_y)
+        bot_reg = LinearRegression().fit(bot_X, bot_y)
+        top_slope = top_reg.coef_[0, 0]
+        top_int = top_reg.intercept_[0]
+        bot_slope = bot_reg.coef_[0, 0]
+        bot_int = bot_reg.intercept_[0]
+
+
+        for track in tracker.tracks:
+            if not track.is_confirmed() or track.time_since_update > 50:
                 continue
             bbox = track.to_tlbr()  # Get the corrected/predicted bounding box
             bbox_height = bbox[3] - bbox[1]
             class_name = track.get_class()  # Get the class name of particular object
             tracking_id = track.track_id  # Get the ID for the particular track
             index = key_list[val_list.index(class_name)]  # Get predicted object index by object name
-            if not (320 < bbox[3] < 700) or bbox_height > 600:
+            in_line = bbox[3] < 680 and bbox[1] > 180
+
+            # people NOT in line
+            if not in_line:
                 not_in_line_bboxes.append(bbox.tolist() + [tracking_id, index])
-                continue
-            tracked_bboxes.append(bbox.tolist() + [tracking_id,
-                                                   index])  # Structure data, that we could use it with our draw_bbox function
+
+            # people in line
+            else:
+                tracked_bboxes.append(bbox.tolist() + [tracking_id,
+                                                       index])  # Structure data, that we could use it with our draw_bbox function
+                if bbox[0] < thresh_left:
+                    curr_left_ppl.append(tracking_id)
+                if bbox[0] < thresh_right:
+                    curr_mid_ppl.append(tracking_id)
+
+        diff_left = list(set(curr_left_ppl) - set(prev_left_ppl))
+        diff_mid = list(set(curr_mid_ppl) - set(prev_mid_ppl))
+
+        throughput = (len(diff_left) + len(diff_mid)) / 0.8
+        tput_history.append(throughput)
+        if len(tput_history) > 30:
+            tput_history = tput_history[1:]
+                # # add everyone who should be tracked as being in line
+                # if i == 0 and bbox[0] > x_thresh:
+                #     persons[tracking_id] = [bbox[0]]
+                # # now we will have everyone to the right of the threshold's locations and start to track average delta x's
+                # if i == 1:
+                #     for id in persons:
+                #         persons[id].append(bbox[0])
+                #         persons[id].append(persons[id][1] - persons[id][0])
+                # # on the 50th iteration, stop tracking people who aren't moving left
+                # if i == 50:
+                #     for id in persons:
+                #         if persons[id][2] > 0:
+                #             persons.pop(id)
+
+
 
         # draw people in line on frame
         image = draw_bbox(original_frame, tracked_bboxes, CLASSES=CLASSES, tracking=True, in_line=True)
@@ -132,10 +223,19 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
         ms = sum(times) / len(times) * 1000
         fps = 1000 / ms
         fps2 = 1000 / (sum(times_2) / len(times_2) * 1000)
-
-        image = cv2.putText(image, "Time: {:.1f} FPS".format(fps), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1,
-                            (0, 0, 255), 2)
-
+        if len(tput_history) != 0:
+            print(tput_history)
+            tput_mean = sum(tput_history) / len(tput_history)
+            image = cv2.putText(image, "Throughput: {:.3f}".format(tput_mean), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1,
+                                (0, 0, 255), 2)
+            if tput_mean != 0:
+                image = cv2.putText(image, "Wait time: {:.2f} seconds".format(len(tracked_bboxes) / tput_mean), (0, 60), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (255, 0, 0), 2)
+        top_line_start = (0, int(top_int))
+        top_line_end = (1280, int(top_slope * 1280 + top_int))
+        bot_line_start = (0, int(bot_int))
+        bot_line_end = (1280, int(bot_slope * 1280 + bot_int))
+        image = cv2.line(image, top_line_start, top_line_end, (255, 0, 0), 2)
+        image = cv2.line(image, bot_line_start, bot_line_end, (255, 0, 0), 2)
         # draw original yolo detection
         # image = draw_bbox(image, bboxes, CLASSES=CLASSES, show_label=False, rectangle_colors=rectangle_colors, tracking=True)
 
