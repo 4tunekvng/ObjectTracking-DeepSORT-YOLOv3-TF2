@@ -14,7 +14,7 @@ from deep_sort.detection import Detection
 from deep_sort.tracker import Tracker
 from deep_sort import generate_detections as gdet
 
-video_path = "people_in_line.mp4"
+video_path = "line3.mp4"
 
 
 def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, CLASSES=YOLO_COCO_CLASSES,
@@ -37,11 +37,12 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
         vid = cv2.VideoCapture(0)  # detect from webcam
 
     # by default VideoCapture returns float instead of int
-    width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+    # width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = int(vid.get(cv2.CAP_PROP_FPS))
     codec = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter(output_path, codec, fps, (width, height))  # output_path must be .mp4
+    out = cv2.VideoWriter(output_path, codec, fps, (frame_width, height))  # output_path must be .mp4
 
     NUM_CLASS = read_class_names(CLASSES)
     key_list = list(NUM_CLASS.keys())
@@ -49,8 +50,8 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
 
     # cam: adding code to detect ppl crossing certain point
     # this variable stores the index of the vertical line used as the threshold for counting someone as "moved"
-    thresh_right = int(width/3)
-    thresh_left = int(width*2/3)
+    thresh_right = int(frame_width / 3)
+    thresh_left = int(frame_width * 2 / 3)
     # note: we only want to count people who move in the NEGATIVE x direction
     total_crossers = 0
     # create a dictionary of people identified by #, with both their previous x-left and current x-left
@@ -70,7 +71,28 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
     prev_mid_ppl = []
     prev_left_ppl = []
     tput_history = []
-    for i in range(300):
+
+    top_slope = 0
+    top_int = 0
+    bot_slope = 0
+    bot_int = 0
+
+    top_line_start = 0
+    top_line_end = 0
+    bot_line_start = 0
+    bot_line_end = 0
+
+    if "line1" in video_path:
+        speed_up = 10
+        range_val = 300
+    elif "line2" in video_path:
+        speed_up = 1
+        range_val = 300
+    else:
+        range_val = int(fps * vid.get(cv2.CAP_PROP_FRAME_COUNT))
+        speed_up = 1
+
+    for i in range(range_val):
         _, frame = vid.read()
 
         try:
@@ -139,28 +161,41 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
             prev_mid_ppl = curr_mid_ppl
         curr_left_ppl = []
         curr_mid_ppl = []
+        # if i >= 10:
+        if i == 10:
+            top_X = np.array([])
+            top_y = np.array([])
+            bot_X = np.array([])
+            bot_y = np.array([])
+            top_line_start = 0
+            top_line_end = 0
+            heights =[]
+            for track in tracker.tracks:
+                tl_x, tl_y, width, height = track.to_tlwh()
+                top_X = np.append(top_X, tl_x + int(width/2))
+                top_y = np.append(top_y, tl_y)
+                bot_X = np.append(bot_X, tl_x + int(width/2))
+                bot_y = np.append(bot_y, tl_y + height)
+                heights.append(height)
 
-        top_X = np.array([])
-        top_y = np.array([])
-        bot_X = np.array([])
-        bot_y = np.array([])
-        for track in tracker.tracks:
-            tl_x, tl_y, width, height = track.to_tlwh()
-            top_X = np.append(top_X, tl_x)
-            top_y = np.append(top_y, tl_y)
-            bot_X = np.append(bot_X, tl_x)
-            bot_y = np.append(bot_y, tl_y + height)
-        top_X = top_X.reshape(-1, 1)
-        top_y = top_y.reshape(-1, 1)
-        bot_X = bot_X.reshape(-1, 1)
-        bot_y = bot_y.reshape(-1, 1)
-        top_reg = LinearRegression().fit(top_X, top_y)
-        bot_reg = LinearRegression().fit(bot_X, bot_y)
-        top_slope = top_reg.coef_[0, 0]
-        top_int = top_reg.intercept_[0]
-        bot_slope = bot_reg.coef_[0, 0]
-        bot_int = bot_reg.intercept_[0]
+            heights = np.array(heights)
+            max_height = np.median(heights)
 
+            top_X = top_X.reshape(-1, 1)
+            top_y = top_y.reshape(-1, 1)
+            bot_X = bot_X.reshape(-1, 1)
+            bot_y = bot_y.reshape(-1, 1)
+            top_reg = LinearRegression().fit(top_X, top_y)
+            bot_reg = LinearRegression().fit(bot_X, bot_y)
+            top_slope = top_reg.coef_[0, 0]
+            top_int = top_reg.intercept_[0] - max_height * 0.125
+            bot_slope = bot_reg.coef_[0, 0]
+            bot_int = bot_reg.intercept_[0] + max_height * 0.125
+
+            top_line_start = (0, int(top_int))
+            top_line_end = (int(frame_width), int(top_slope * frame_width + top_int))
+            bot_line_start = (0, int(bot_int))
+            bot_line_end = (int(frame_width), int(bot_slope * frame_width + bot_int))
 
         for track in tracker.tracks:
             if not track.is_confirmed() or track.time_since_update > 50:
@@ -170,7 +205,8 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
             class_name = track.get_class()  # Get the class name of particular object
             tracking_id = track.track_id  # Get the ID for the particular track
             index = key_list[val_list.index(class_name)]  # Get predicted object index by object name
-            in_line = bbox[3] < 680 and bbox[1] > 180
+            in_line = bbox[3] < bot_slope * bbox[2] + bot_int and bbox[1] > top_slope * bbox[
+                0] + top_int  # bbox1 = y value of top left and bbox3 is y value of the bottom
 
             # people NOT in line
             if not in_line:
@@ -188,30 +224,32 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
         diff_left = list(set(curr_left_ppl) - set(prev_left_ppl))
         diff_mid = list(set(curr_mid_ppl) - set(prev_mid_ppl))
 
-        throughput = (len(diff_left) + len(diff_mid)) / 0.8
+        throughput = (len(diff_left) + len(diff_mid)) / (2/(fps*speed_up))
         tput_history.append(throughput)
         if len(tput_history) > 30:
             tput_history = tput_history[1:]
-                # # add everyone who should be tracked as being in line
-                # if i == 0 and bbox[0] > x_thresh:
-                #     persons[tracking_id] = [bbox[0]]
-                # # now we will have everyone to the right of the threshold's locations and start to track average delta x's
-                # if i == 1:
-                #     for id in persons:
-                #         persons[id].append(bbox[0])
-                #         persons[id].append(persons[id][1] - persons[id][0])
-                # # on the 50th iteration, stop tracking people who aren't moving left
-                # if i == 50:
-                #     for id in persons:
-                #         if persons[id][2] > 0:
-                #             persons.pop(id)
-
-
+            # # add everyone who should be tracked as being in line
+            # if i == 0 and bbox[0] > x_thresh:
+            #     persons[tracking_id] = [bbox[0]]
+            # # now we will have everyone to the right of the threshold's locations and start to track average delta x's
+            # if i == 1:
+            #     for id in persons:
+            #         persons[id].append(bbox[0])
+            #         persons[id].append(persons[id][1] - persons[id][0])
+            # # on the 50th iteration, stop tracking people who aren't moving left
+            # if i == 50:
+            #     for id in persons:
+            #         if persons[id][2] > 0:
+            #             persons.pop(id)
 
         # draw people in line on frame
         image = draw_bbox(original_frame, tracked_bboxes, CLASSES=CLASSES, tracking=True, in_line=True)
         # draw people not in line
         image = draw_bbox(image, not_in_line_bboxes, CLASSES=CLASSES, tracking=True, in_line=False)
+
+        if i >= 10:
+            image = cv2.line(image, top_line_start, top_line_end, (255, 0, 0), 2)
+            image = cv2.line(image, bot_line_start, bot_line_end, (255, 0, 0), 2)
 
         t3 = time.time()
         times.append(t2 - t1)
@@ -226,16 +264,13 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
         if len(tput_history) != 0:
             print(tput_history)
             tput_mean = sum(tput_history) / len(tput_history)
-            image = cv2.putText(image, "Throughput: {:.3f}".format(tput_mean), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1,
+            image = cv2.putText(image, "Throughput: {:.3f}".format(tput_mean), (0, 30), cv2.FONT_HERSHEY_COMPLEX_SMALL,
+                                1,
                                 (0, 0, 255), 2)
             if tput_mean != 0:
-                image = cv2.putText(image, "Wait time: {:.2f} seconds".format(len(tracked_bboxes) / tput_mean), (0, 60), cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (255, 0, 0), 2)
-        top_line_start = (0, int(top_int))
-        top_line_end = (1280, int(top_slope * 1280 + top_int))
-        bot_line_start = (0, int(bot_int))
-        bot_line_end = (1280, int(bot_slope * 1280 + bot_int))
-        image = cv2.line(image, top_line_start, top_line_end, (255, 0, 0), 2)
-        image = cv2.line(image, bot_line_start, bot_line_end, (255, 0, 0), 2)
+                image = cv2.putText(image, "Wait time: {:.2f} seconds".format(len(tracked_bboxes) / tput_mean), (0, 60),
+                                    cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (255, 0, 0), 2)
+
         # draw original yolo detection
         # image = draw_bbox(image, bboxes, CLASSES=CLASSES, show_label=False, rectangle_colors=rectangle_colors, tracking=True)
 
@@ -255,5 +290,5 @@ def Object_tracking(Yolo, video_path, output_path, input_size=416, show=False, C
 if __name__ == '__main__':
     yolo = Load_Yolo_model()
     Object_tracking(yolo, video_path, "track.mp4", input_size=YOLO_INPUT_SIZE, show=False, iou_threshold=0.1,
-                rectangle_colors=(255, 0, 0), Track_only=["person"])
+                    rectangle_colors=(255, 0, 0), Track_only=["person"])
     exit(0)
